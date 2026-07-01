@@ -1,5 +1,7 @@
 # `pr_dashboard.py` — vertical PR dashboard
 
+Built to stay on top of PRs opened by multiple coding agents running in parallel. When you have several AI agents each opening PRs on your behalf, it's easy to lose track of what's waiting for review, what's blocked by conflicts, and what's ready to merge. This dashboard gives you a persistent, narrow column on the side of your screen so you always know the state at a glance.
+
 Narrow column (34 chars wide) showing open PRs, designed to **dock on the side of an ultrawide monitor** and run in watch mode. Each PR is a clickable card; in watch mode it's a **live interactive TUI** (filter and hide by keypress). Zero embedded credentials — uses the already-authenticated `gh` CLI.
 
 ## Prerequisites
