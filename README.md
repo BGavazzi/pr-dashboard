@@ -1,158 +1,129 @@
-# `pr_dashboard.py` — dashboard vertical de PRs abertas
+# `pr_dashboard.py` — vertical PR dashboard
 
-Coluna estreita (34 col) com as PRs abertas, pensada pra **encostar na lateral
-de um monitor ultrawide** e deixar rodando em modo watch. Cada PR é um card
-clicável; no modo watch é uma **TUI interativa** (filtra e oculta por tecla).
-Zero credencial embutida — usa o `gh` CLI já autenticado.
+Narrow column (34 chars wide) showing open PRs, designed to **dock on the side of an ultrawide monitor** and run in watch mode. Each PR is a clickable card; in watch mode it's a **live interactive TUI** (filter and hide by keypress). Zero embedded credentials — uses the already-authenticated `gh` CLI.
 
-## Pré-requisitos
+## Prerequisites
 
-- [`gh` CLI](https://cli.github.com/) instalado e logado:
+- [`gh` CLI](https://cli.github.com/) installed and logged in:
   ```bash
-  gh auth status   # deve mostrar "Logged in"
-  gh auth login    # se ainda não estiver
+  gh auth status   # should show "Logged in"
+  gh auth login    # if not yet
   ```
-- Python 3.10+ (sem dependências externas — só stdlib).
-- Terminal com suporte a **hyperlinks OSC 8** pros links clicáveis
-  (Windows Terminal, iTerm2, kitty, WezTerm, GNOME Terminal — todos suportam).
+- Python 3.10+ (no external dependencies — stdlib only).
+- Terminal with **OSC 8 hyperlink** support for clickable links
+  (Windows Terminal, iTerm2, kitty, WezTerm, GNOME Terminal — all supported).
 
-## Uso rápido
+## Quick start
 
 ```bash
-# render único das MINHAS PRs abertas
+# single render of YOUR open PRs
 python pr_dashboard.py
 
-# modo watch — TUI viva no canto da tela: refresca a cada 60s + responde a teclas
+# watch mode — live TUI in the corner of your screen: refreshes every 60s + responds to keys
 python pr_dashboard.py --watch
-python pr_dashboard.py --watch 30      # refresca a cada 30s
+python pr_dashboard.py --watch 30      # refresh every 30s
 ```
 
-No Windows tem o wrapper PowerShell que já fixa UTF-8:
+On Windows there's a PowerShell wrapper that fixes UTF-8:
 
 ```powershell
 .\pr-dash.ps1            # watch 60s
 .\pr-dash.ps1 30         # watch 30s
-.\pr-dash.ps1 -Once      # render único
+.\pr-dash.ps1 -Once      # single render
 ```
 
-## Teclas (modo --watch, TTY)
+## Keys (--watch mode, TTY)
 
-A TUI responde a teclas sem reabrir. Filtros são estado ao vivo:
+The TUI responds to keypresses without restarting. Filters are live state:
 
-| Tecla | Ação |
+| Key | Action |
 |---|---|
-| `espaço` | **recarrega já** do GitHub (botão de reload — não espera o intervalo) |
-| `a` | mostra **todas** as PRs |
-| `m` | só as **prontas pra merge** (`mergeStateStatus == CLEAN`) |
-| `c` | só as **com conflito** (`mergeStateStatus == DIRTY`) |
-| `r` | **restaura** todas as PRs ocultas |
-| `q` | **sai** |
-| letra/nº do card | **oculta** aquela PR (persistente — ver abaixo) |
+| `space` | **reload now** from GitHub (reload button — doesn't wait for the interval) |
+| `a` | show **all** PRs |
+| `m` | only **ready to merge** (`mergeStateStatus == CLEAN`) |
+| `c` | only **with conflicts** (`mergeStateStatus == DIRTY`) |
+| `r` | **restore** all hidden PRs |
+| `q` | **quit** |
+| card letter/number | **hide** that PR (persistent — see below) |
 
-O filtro ativo aparece destacado no rodapé. Trocar de filtro ou ocultar uma PR
-re-renderiza **na hora** (sem nova chamada de API); a recarga do GitHub só
-acontece quando o intervalo do `--watch` estoura.
+The active filter is highlighted in the footer. Switching filters or hiding a PR re-renders **immediately** (no new API call); GitHub reload only happens when the `--watch` interval expires.
 
 ## Flags
 
-| Flag | O que faz |
+| Flag | What it does |
 |---|---|
-| `--watch [segundos]` | Loop com TUI interativa (default 60s). |
-| `--no-rich` | Pula CI/review/merge/diff → **1 chamada** de API só. Bem mais rápido. |
-| `--ready` | Abre já filtrado em "prontas pra merge" (= tecla `m`). |
-| `--conflicts` | Abre já filtrado em "com conflito" (= tecla `c`). |
-| `--org <ORG>` | Cobre toda a org, não só PRs autoradas por você. |
-| `--review-requested` | PRs aguardando o **seu** review (em vez das suas). |
-| `--no-builds` | Não consulta o painel **BUILDS RODANDO** (1 chamada `gh run list` a menos por repo). |
-| `--builds-repo <O/R>` | Repo extra pra vigiar builds (**repetível**). Override do default. |
-| `--clear-hidden` | Restaura todas as PRs ocultas e sai. |
-| `--no-input` | Watch sem teclado (refresh puro) — pra ambientes não-TTY. |
+| `--watch [seconds]` | Loop with interactive TUI (default 60s). |
+| `--no-rich` | Skips CI/review/merge/diff → **1 API call** only. Much faster. |
+| `--ready` | Opens already filtered to "ready to merge" (= key `m`). |
+| `--conflicts` | Opens already filtered to "with conflicts" (= key `c`). |
+| `--org <ORG>` | Covers the entire org, not just PRs authored by you. |
+| `--review-requested` | PRs awaiting **your** review (instead of yours). |
+| `--no-builds` | Skip the **RUNNING BUILDS** panel (1 fewer `gh run list` call per repo). |
+| `--builds-repo <O/R>` | Extra repo to watch for builds (**repeatable**). Overrides default. |
+| `--clear-hidden` | Restore all hidden PRs and exit. |
+| `--no-input` | Watch without keyboard (pure refresh) — for non-TTY environments. |
 
-Exemplos:
+Examples:
 
 ```bash
-python pr_dashboard.py --watch --ready                # abre nas prontas
-python pr_dashboard.py --org <your-org> --watch       # toda a org, interativo
-python pr_dashboard.py --review-requested             # esperando meu review
-python pr_dashboard.py --clear-hidden                 # zera as ocultas
+python pr_dashboard.py --watch --ready                # open on ready-to-merge
+python pr_dashboard.py --org <your-org> --watch       # whole org, interactive
+python pr_dashboard.py --review-requested             # awaiting my review
+python pr_dashboard.py --clear-hidden                 # reset hidden PRs
 ```
 
-Via wrapper, repasse flags com `-Args`:
+Via wrapper, pass flags with `-Args`:
 
 ```powershell
 .\pr-dash.ps1 -Args '--org','<your-org>','--ready'
 ```
 
-## Como ler um card
+## Reading a card
 
 ```
- a  12d  ✗ mudanças ⚠     ← [label] · idade · CI · review · estado de merge
- owner/my-repo #42         ← repo + número (Ctrl+clique abre a PR)
- feat(companies): notes    ← título com wrap (também clicável)
+ a  12d  ✗ changes ⚠     ← [label] · age · CI · review · merge state
+ owner/my-repo #42         ← repo + number (Ctrl+click opens PR)
+ feat(companies): notes    ← title with wrap (also clickable)
  history (append-only)…
- +856/-1                   ← diff (linhas +/-)
+ +856/-1                   ← diff (lines +/-)
 ────────────────────────
 ```
 
-- **label** (`a`, `1`…): só no modo interativo — aperte pra ocultar o card.
-- **Idade**: verde `<3d` · amarelo `<14d` · vermelho `≥14d`. Cards ordenados da
-  **mais antiga pro topo**.
-- **CI**: `✓` tudo verde · `✗` alguma falha · `⋯` rodando · `·` sem checks.
-- **Review**: `aprovado` / `mudanças` / `review` (pendente) / `sem review`.
-- **Merge**: `⇪` (verde) pronta pra merge · `⚠` (vermelho) conflito ·
-  `↺` (amarelo) branch atrás da base · *(nada)* = `UNKNOWN`/`BLOCKED`.
-- **`◌`** antes do repo = PR em **draft**.
-- **`⏳ aguardando <nomes>`**: aparece quando há reviewer solicitado que ainda
-  não revisou (até 3 nomes + contador). Tirado de `reviewRequests`.
-- **`⟳ build rodando`**: aparece quando o CI da PR está em andamento.
+- **label** (`a`, `1`…): interactive mode only — press to hide the card.
+- **Age**: green `<3d` · yellow `<14d` · red `≥14d`. Cards sorted **oldest first**.
+- **CI**: `✓` all green · `✗` some failure · `⋯` running · `·` no checks.
+- **Review**: `approved` / `changes` / `review` (pending) / `no review`.
+- **Merge**: `⇪` (green) ready to merge · `⚠` (red) conflict · `↺` (yellow) branch behind base · *(nothing)* = `UNKNOWN`/`BLOCKED`.
+- **`◌`** before the repo = PR is a **draft**.
+- **`⏳ waiting <names>`**: appears when there's a requested reviewer who hasn't reviewed yet (up to 3 names + count). Sourced from `reviewRequests`.
+- **`⟳ build running`**: appears when the PR's CI is in progress.
 
-## Painel BUILDS RODANDO
+## RUNNING BUILDS panel
 
-Acima dos cards, quando há **workflow runs em andamento** nos repos vigiados:
+Above the cards, when there are **workflow runs in progress** on watched repos:
 
 ```
- BUILDS RODANDO · 1
- ⟳ owner/my-repo  homolog        ← glifo · repo · ambiente (homolog/prod)
-   Deploy staging · main          ← workflow · branch/tag (Ctrl+clique abre o run)
+ RUNNING BUILDS · 1
+ ⟳ owner/my-repo  production        ← glyph · repo · environment
+   Deploy staging · main             ← workflow · branch/tag (Ctrl+click opens the run)
 ```
 
-Isso é **separado dos checks de PR de propósito**: se o CI roda em `push` (não
-em PR), esses runs não aparecem como check de nenhuma PR aberta. O painel os
-busca via `gh run list`. `prod` (vermelho) = workflow com "production" no nome;
-senão `homolog` (ciano).
+This is **intentionally separate from PR checks**: if CI runs on `push` (not on PRs), those runs don't appear as checks on any open PR. The panel fetches them via `gh run list`. `prod` (red) = workflow with "production" in the name; otherwise `homolog` (cyan).
 
-**Repos vigiados** (precedência): `--builds-repo` (repetível) → env
-`PR_DASH_BUILD_REPOS="owner/a,owner/b"` → padrão vazio (painel desativado se
-nenhum repo configurado). Desliga o painel explicitamente com `--no-builds`.
+**Watched repos** (precedence): `--builds-repo` (repeatable) → env `PR_DASH_BUILD_REPOS="owner/a,owner/b"` → default empty (panel disabled if no repo configured). Disable explicitly with `--no-builds`.
 
-## PRs ocultas
+## Hidden PRs
 
-Ocultar um card (tecla do label) some com ele e grava em
-`~/.pr-dashboard-hidden.json` (chave `owner/repo#num`) — continua oculto nas
-próximas execuções. `r` restaura tudo; `--clear-hidden` também. O contador
-"(N ocultas)" no header conta só as ocultas por você, não as filtradas por
-`--ready`/`--conflicts`.
+Hiding a card (label key) removes it and saves to `~/.pr-dashboard-hidden.json` (key `owner/repo#num`) — stays hidden across runs. `r` restores all; `--clear-hidden` also works. The "(N hidden)" counter in the header counts only PRs you hid, not those filtered by `--ready`/`--conflicts`.
 
-## Notas de design
+## Design notes
 
-- **Sem creds no código.** O token vem do keyring do SO via `gh auth`. Dá pra
-  versionar e compartilhar sem vazar nada.
-- **Custo de API.** O modo default faz `1 + N` chamadas (lista + 1 `gh pr view`
-  por PR pra CI/review/merge/diff) **+ 1 `gh run list` por repo vigiado** pro
-  painel de builds. Trocar de filtro ou ocultar **não** chama a API (re-render
-  local). Com muitas PRs, use `--no-rich`; pra cortar o painel, `--no-builds`.
-- **Não é tempo real.** O watch dorme o intervalo inteiro entre recargas — mas
-  `espaço` força um reload imediato sem esperar.
+- **No credentials in code.** The token comes from the OS keyring via `gh auth`. Safe to version and share without leaking anything.
+- **API cost.** Default mode makes `1 + N` calls (list + 1 `gh pr view` per PR for CI/review/merge/diff) **+ 1 `gh run list` per watched repo** for the builds panel. Switching filters or hiding cards does **not** call the API (local re-render). With many PRs, use `--no-rich`; to cut the panel, `--no-builds`.
+- **Not real-time.** Watch sleeps the full interval between reloads — but `space` forces an immediate reload without waiting.
 
-## Limitações conhecidas
+## Known limitations
 
-- `gh search prs` não expõe `reviewDecision`/CI/merge diretamente → daí o
-  `gh pr view` por PR. Sem ele (`--no-rich`) você perde essas colunas e os
-  filtros `--ready`/`--conflicts`.
-- **`mergeStateStatus` é eventualmente consistente.** O GitHub calcula a
-  mergeabilidade de forma preguiçosa: a primeira consulta a uma PR pode voltar
-  `UNKNOWN` (sem marcador, e fora de `--ready`/`--conflicts`). O próximo refresh
-  do watch normalmente já resolve. Então uma PR "sumir" de `--ready` por um
-  ciclo é esperado, não bug.
-- A largura é fixa em `W = 34` no topo do script — ajuste lá se quiser outra.
-```
+- `gh search prs` doesn't expose `reviewDecision`/CI/merge directly → hence the `gh pr view` per PR. Without it (`--no-rich`) you lose those columns and the `--ready`/`--conflicts` filters.
+- **`mergeStateStatus` is eventually consistent.** GitHub computes mergeability lazily: the first query on a PR may return `UNKNOWN` (no marker, excluded from `--ready`/`--conflicts`). The next watch refresh usually resolves it. A PR "disappearing" from `--ready` for one cycle is expected, not a bug.
+- Column width is fixed at `W = 34` at the top of the script — adjust there if you want a different width.
