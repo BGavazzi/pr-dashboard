@@ -118,6 +118,28 @@ This is **intentionally separate from PR checks**: if CI runs on `push` (not on 
 
 Hiding a card (label key) removes it and saves to `~/.pr-dashboard-hidden.json` (key `owner/repo#num`) — stays hidden across runs. `r` restores all; `--clear-hidden` also works. The "(N hidden)" counter in the header counts only PRs you hid, not those filtered by `--ready`/`--conflicts`.
 
+## Stale worktree reaper
+
+When running many parallel agents, you accumulate worktrees fast. The reaper cleans up worktrees that are safe to delete: PR merged + branch 0 commits ahead of remote + clean working tree. Before removing anything it logs a recreate command to `~/.pr-dashboard-reaped.json` as a fallback.
+
+Protected from reaping: names ending in `-main`, containing `homolog` or `prod`, or listed in `~/.pr-dashboard-keep.json`.
+
+```bash
+# Dry run — shows what's reapable and why each kept worktree is kept
+python pr_dashboard.py --worktrees
+
+# Actually reap
+python pr_dashboard.py --reap-worktrees
+
+# Cap at N removals per run
+python pr_dashboard.py --reap-worktrees --reap-limit 5
+
+# Specify worktree root (default: PR_DASH_WT_ROOT env var)
+python pr_dashboard.py --worktrees --reap-root C:\your\worktrees
+```
+
+Set the root permanently via `PR_DASH_WT_ROOT` env var so you don't need `--reap-root` every time.
+
 ## Design notes
 
 - **No credentials in code.** The token comes from the OS keyring via `gh auth`. Safe to version and share without leaking anything.
