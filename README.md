@@ -26,13 +26,24 @@ python pr_dashboard.py --watch
 python pr_dashboard.py --watch 30      # refresh every 30s
 ```
 
-On Windows there's a PowerShell wrapper that fixes UTF-8:
+Platform wrappers (both just fix UTF-8 and forward flags):
 
 ```powershell
+# Windows
 .\pr-dash.ps1            # watch 60s
 .\pr-dash.ps1 30         # watch 30s
 .\pr-dash.ps1 -Once      # single render
 ```
+
+```bash
+# Linux / macOS
+chmod +x pr-dash.sh
+./pr-dash.sh             # watch 60s
+./pr-dash.sh 30          # watch 30s
+./pr-dash.sh --once      # single render
+```
+
+The Python script itself (`pr_dashboard.py`) is cross-platform — keyboard input uses `msvcrt` on Windows, `termios`/`select` on POSIX. The wrappers are optional convenience.
 
 ## Keys (--watch mode, TTY)
 
@@ -64,6 +75,8 @@ The active filter is highlighted in the footer. Switching filters or hiding a PR
 | `--builds-repo <O/R>` | Extra repo to watch for builds (**repeatable**). Overrides default. |
 | `--clear-hidden` | Restore all hidden PRs and exit. |
 | `--no-input` | Watch without keyboard (pure refresh) — for non-TTY environments. |
+| `--notify` | Enable desktop notifications on state change (see below). |
+| `--width <N>` | Override column width (default: auto-detect from terminal, 24–120). |
 
 Examples:
 
@@ -114,6 +127,25 @@ This is **intentionally separate from PR checks**: if CI runs on `push` (not on 
 
 **Watched repos** (precedence): `--builds-repo` (repeatable) → env `PR_DASH_BUILD_REPOS="owner/a,owner/b"` → default empty (panel disabled if no repo configured). Disable explicitly with `--no-builds`.
 
+## Desktop notifications
+
+Pass `--notify` to fire a native OS notification when a PR's state changes between watch cycles:
+- PR reaches **ready to merge** (`mergeStateStatus == CLEAN`): `✅ Ready to merge`
+- CI flips to **failure**: `❌ CI failed`
+
+| OS | Backend |
+|---|---|
+| Linux | `notify-send` (install `libnotify-bin` if missing) |
+| macOS | `osascript` (built-in) |
+| Windows | PowerShell `BurntToast` module (`Install-Module BurntToast`) |
+
+```bash
+python pr_dashboard.py --watch --notify
+./pr-dash.sh --notify
+```
+
+Notifications are best-effort — they never crash the dashboard if the backend is missing.
+
 ## Hidden PRs
 
 Hiding a card (label key) removes it and saves to `~/.pr-dashboard-hidden.json` (key `owner/repo#num`) — stays hidden across runs. `r` restores all; `--clear-hidden` also works. The "(N hidden)" counter in the header counts only PRs you hid, not those filtered by `--ready`/`--conflicts`.
@@ -134,11 +166,11 @@ python pr_dashboard.py --reap-worktrees
 # Cap at N removals per run
 python pr_dashboard.py --reap-worktrees --reap-limit 5
 
-# Specify worktree root (default: PR_DASH_WT_ROOT env var)
+# Specify worktree root explicitly
 python pr_dashboard.py --worktrees --reap-root C:\your\worktrees
 ```
 
-Set the root permanently via `PR_DASH_WT_ROOT` env var so you don't need `--reap-root` every time.
+**Root resolution order**: `--reap-root` → `PR_DASH_WT_ROOT` env var → auto-detect from `git worktree list` in cwd. If all linked worktrees share a common parent directory, that parent is used automatically — no config needed if you run the command from inside your main repo.
 
 ## Design notes
 

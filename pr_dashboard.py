@@ -27,6 +27,12 @@ Stale worktree reaper (cleans disk; separate mode, not part of --watch):
   Protects live checkouts (name *-main / *homolog* / *prod* + ~/.pr-dashboard-keep.json).
   Each removal is logged to ~/.pr-dashboard-reaped.json with a recreate command (fallback).
 
+Desktop notifications (fired on state change between watch cycles):
+    --notify               enable notifications (auto-selects backend by OS)
+    --no-notify            disable (default)
+  Fires when a PR moves to CLEAN (ready to merge) or CI flips to failure.
+  Backends: notify-send (Linux), osascript (macOS), PowerShell BurntToast (Windows).
+
 Keys in --watch mode (TTY):
     space                  → reload now from GitHub (reload button)
     a / m / c             → filter: all / ready to merge / with conflicts
@@ -47,14 +53,25 @@ See full guide in scripts/pr-dashboard.md.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 
-W = 34  # column width
+def _col_width():
+    """Use --width N if given, else current terminal columns (clamped 24–120), else 34."""
+    if "--width" in sys.argv:
+        i = sys.argv.index("--width")
+        if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit():
+            return max(24, min(120, int(sys.argv[i + 1])))
+    cols = shutil.get_terminal_size(fallback=(0, 0)).columns
+    return max(24, min(120, cols)) if cols else 34
+
+W = _col_width()
 RICH = "--no-rich" not in sys.argv
 BUILDS = "--no-builds" not in sys.argv
+NOTIFY = "--notify" in sys.argv
 LABELS = "123456789bdefghijklnopstuvwxyz"  # excludes a/c/m/q/r (command keys)
 HIDDEN_FILE = os.path.join(os.path.expanduser("~"), ".pr-dashboard-hidden.json")
 
@@ -69,6 +86,58 @@ class C:
     RESET = "\033[0m"; DIM = "\033[2m"; BOLD = "\033[1m"
     RED = "\033[91m"; GRN = "\033[92m"; YEL = "\033[93m"
     CYN = "\033[96m"; GRY = "\033[90m"; WHT = "\033[97m"; BLU = "\033[94m"
+
+
+def _notify(title, body):
+    """Fire a desktop notification if --notify is set. Best-effort, never crashes."""
+    if not NOTIFY:
+        return
+    try:
+        if os.name == "nt":
+            script = (
+                "Import-Module BurntToast -ErrorAction SilentlyContinue; "
+                f"New-BurntToastNotification -Text '{title}','{body}'"
+            )
+            subprocess.Popen(["powershell", "-WindowStyle", "Hidden", "-Command", script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys.platform == "darwin":
+            subprocess.Popen(
+                ["osascript", "-e",
+                 f'display notification "{body}" with title "{title}"'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["notify-send", title, body],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def _state_snapshot(rows):
+    """Lightweight snapshot: pr_key → (mergeStateStatus, CI conclusion) for diffing."""
+    snap = {}
+    for p, repo, rich in rows:
+        key = pr_key(repo, p["number"])
+        ci_states = [(c.get("conclusion") or c.get("state") or "").upper()
+                     for c in (rich.get("statusCheckRollup") or [])]
+        failed = any(s in ("FAILURE", "ERROR", "TIMED_OUT") for s in ci_states)
+        snap[key] = (rich.get("mergeStateStatus"), failed)
+    return snap
+
+
+def _diff_notify(prev, curr, rows):
+    """Compare snapshots and fire notifications for meaningful state changes."""
+    if not NOTIFY or prev is None:
+        return
+    # Build title lookup
+    titles = {pr_key(repo, p["number"]): (p["title"][:40], repo.split("/")[-1])
+              for p, repo, _ in rows}
+    for key, (merge, failed) in curr.items():
+        prev_merge, prev_failed = prev.get(key, (None, None))
+        title, repo = titles.get(key, ("PR", ""))
+        if merge == "CLEAN" and prev_merge != "CLEAN":
+            _notify(f"✅ Ready to merge — {repo}", title)
+        elif failed and not prev_failed:
+            _notify(f"❌ CI failed — {repo}", title)
 
 
 def _resolve_token():
@@ -449,17 +518,40 @@ def _cleanup_dir(path):
     return True, None
 
 
+def _infer_wt_root():
+    """Infer worktree root from `git worktree list` in cwd.
+    All linked worktrees share a common parent directory — that parent is the root."""
+    r = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                       capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        return None
+    paths = [line[len("worktree "):] for line in r.stdout.splitlines()
+             if line.startswith("worktree ")]
+    if len(paths) < 2:
+        return None  # only main worktree; nothing linked
+    # linked worktrees start at index 1; their common parent is the root
+    parents = {os.path.dirname(os.path.abspath(p)) for p in paths[1:]}
+    if len(parents) == 1:
+        return parents.pop()
+    return None  # worktrees in different dirs — can't infer a single root
+
+
 def wt_root():
-    """Root of sibling worktrees. --reap-root FLAG > env PR_DASH_WT_ROOT."""
+    """Root of sibling worktrees. --reap-root FLAG > env PR_DASH_WT_ROOT > git auto-detect."""
     if "--reap-root" in sys.argv:
         i = sys.argv.index("--reap-root")
         if i + 1 < len(sys.argv):
             return sys.argv[i + 1]
-    root = os.environ.get("PR_DASH_WT_ROOT", "").strip()
-    if not root:
-        print("Set PR_DASH_WT_ROOT or use --reap-root <path>.", file=sys.stderr)
-        sys.exit(1)
-    return root
+    env = os.environ.get("PR_DASH_WT_ROOT", "").strip()
+    if env:
+        return env
+    inferred = _infer_wt_root()
+    if inferred:
+        print(f"Auto-detected worktree root: {inferred}", file=sys.stderr)
+        return inferred
+    print("Could not detect worktree root. Set PR_DASH_WT_ROOT or use --reap-root <path>.",
+          file=sys.stderr)
+    sys.exit(1)
 
 
 def repo_slug(d):
@@ -669,11 +761,15 @@ def main():
     all_rows = None
     all_builds = []
     need_fetch = True
+    prev_snap = None
 
     while True:
         if need_fetch:
             all_rows = fetch()
             all_builds = fetch_builds() if BUILDS else []
+            curr_snap = _state_snapshot(all_rows)
+            _diff_notify(prev_snap, curr_snap, all_rows)
+            prev_snap = curr_snap
             need_fetch = False
         visible = [r for r in all_rows if pr_key(r[1], r[0]["number"]) not in hidden]
         hidden_count = len(all_rows) - len(visible)  # only user-hidden, not filtered
