@@ -409,20 +409,29 @@ def fetch_builds():
     return out
 
 
+USAGE_CACHE_TTL = 300  # the endpoint rate-limits hard on frequent polling
+_usage_cache = {"ts": 0, "data": None}
+
+
 def fetch_usage():
     """Claude Code session (5h) / week (7d) usage %, read from the local OAuth
-    token. Read-only — never refreshes or writes the token back; any failure
-    (missing file, expired token, network, rate limit) just returns None and
-    the panel disappears rather than erroring the whole dashboard."""
+    token. Read-only — never refreshes or writes the token back. Cached for
+    USAGE_CACHE_TTL: this is an undocumented endpoint that 429s quickly under
+    repeated polling (every --watch tick, every manual reload), so within the
+    TTL we serve the cached value, and on a failed refetch we fall back to
+    whatever's cached rather than blanking the panel."""
     if not USAGE:
         return None
+    now = time.time()
+    if now - _usage_cache["ts"] < USAGE_CACHE_TTL and _usage_cache["data"] is not None:
+        return _usage_cache["data"]
     try:
         with open(CREDS_FILE, encoding="utf-8") as f:
             token = json.load(f)["claudeAiOauth"]["accessToken"]
     except (OSError, ValueError, KeyError):
-        return None
+        return _usage_cache["data"]
     if not token:
-        return None
+        return _usage_cache["data"]
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
@@ -433,13 +442,18 @@ def fetch_usage():
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read())
     except (urllib.error.URLError, OSError, ValueError):
-        return None
+        # Keep serving stale data through a transient/429 failure, and back
+        # off for the full TTL so retrying doesn't compound the rate limit.
+        _usage_cache["ts"] = now
+        return _usage_cache["data"]
     out = []
     for key, label in (("five_hour", "session"), ("seven_day", "week")):
         block = data.get(key)
         if block and block.get("utilization") is not None:
             out.append((label, block["utilization"], block.get("resets_at")))
-    return out or None
+    out = out or None
+    _usage_cache["ts"], _usage_cache["data"] = now, out
+    return out
 
 
 # ── Antigravity (opt-in, reverse-engineered — see module docstring) ─────────
