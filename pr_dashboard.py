@@ -16,6 +16,8 @@ Usage:
     python pr_dashboard.py --conflicts      # only with merge conflicts
     python pr_dashboard.py --no-builds      # skip running builds panel (1 fewer call/repo)
     python pr_dashboard.py --builds-repo O/R  # repo to watch for builds (repeatable)
+    python pr_dashboard.py --no-usage       # skip Claude Code usage panel
+    python pr_dashboard.py --antigravity    # opt-in Google Antigravity quota panel (see below)
     python pr_dashboard.py --clear-hidden   # restore all hidden PRs and exit
 
 Stale worktree reaper (cleans disk; separate mode, not part of --watch):
@@ -49,14 +51,36 @@ staging (push→main) AND prod release (push→tag). These are NOT PR checks,
 so the query is separate (`gh run list`). Override with --builds-repo or
 env PR_DASH_BUILD_REPOS="owner/a,owner/b". Default = empty (configure via --builds-repo).
 
+"USAGE" panel: Claude Code session (5h) and week (7d) usage %, read from the
+OAuth token Claude Code already keeps at ~/.claude/.credentials.json — no
+separate login. Read-only: never refreshes or writes back the token (that's
+the CLI's job), so a stale/expired token just makes the panel go quiet
+instead of erroring. Disable with --no-usage.
+
+"ANTIGRAVITY" panel (opt-in, --antigravity): Google Antigravity quota. Unlike
+Claude Code there is no readable token file, so this is best-effort by
+construction — two undocumented/reverse-engineered paths, tried in order:
+  1. Local mode — detects the running Antigravity IDE's language-server
+     process, pulls its --csrf_token/--extension_server_port, and calls its
+     local RPC directly. Zero new credentials, but only works while the
+     Antigravity IDE window is open.
+  2. CLI fallback — shells out to `antigravity-usage --json` if that npm
+     tool (github.com/skainguyen1412/antigravity-usage) is installed and
+     logged in; it owns its own OAuth token store, separate from this script.
+Both can break silently on an Antigravity update — every step fails quiet
+and the panel just doesn't appear. Off by default; pass --antigravity to try it.
+
 See full guide in scripts/pr-dashboard.md.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 def _col_width():
@@ -71,9 +95,16 @@ def _col_width():
 W = _col_width()
 RICH = "--no-rich" not in sys.argv
 BUILDS = "--no-builds" not in sys.argv
+USAGE = "--no-usage" not in sys.argv
+ANTIGRAVITY = "--antigravity" in sys.argv
 NOTIFY = "--notify" in sys.argv
 LABELS = "123456789bdefghijklnopstuvwxyz"  # excludes a/c/m/q/r (command keys)
 HIDDEN_FILE = os.path.join(os.path.expanduser("~"), ".pr-dashboard-hidden.json")
+CREDS_FILE = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# The endpoint rate-limits hard without a Claude Code User-Agent; exact patch
+# version isn't validated, a stable recent one is fine.
+USAGE_USER_AGENT = "claude-code/2.1.183"
 
 # Windows console often defaults to cp1252 — force utf-8 for glyphs/accents
 try:
@@ -244,6 +275,26 @@ def age(created_iso):
     return f"{days}d", C.RED
 
 
+def _fmt_reset(iso):
+    """'13:30' if the reset is today, else 'Fri 13:30'. Empty string on bad input."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return ""
+    fmt = "%H:%M" if dt.date() == datetime.now().astimezone().date() else "%a %H:%M"
+    return dt.strftime(fmt)
+
+
+def usage_col(pct):
+    if pct >= 80:
+        return C.RED
+    if pct >= 50:
+        return C.YEL
+    return C.GRN
+
+
 def ci_status(rollup):
     """Returns (glyph, running) — `running` is True if a build is in progress."""
     if not rollup:
@@ -358,7 +409,162 @@ def fetch_builds():
     return out
 
 
-def render(rows, hidden_count, interactive, fmode="all", builds=None):
+def fetch_usage():
+    """Claude Code session (5h) / week (7d) usage %, read from the local OAuth
+    token. Read-only — never refreshes or writes the token back; any failure
+    (missing file, expired token, network, rate limit) just returns None and
+    the panel disappears rather than erroring the whole dashboard."""
+    if not USAGE:
+        return None
+    try:
+        with open(CREDS_FILE, encoding="utf-8") as f:
+            token = json.load(f)["claudeAiOauth"]["accessToken"]
+    except (OSError, ValueError, KeyError):
+        return None
+    if not token:
+        return None
+    req = urllib.request.Request(USAGE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": USAGE_USER_AGENT,
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    out = []
+    for key, label in (("five_hour", "session"), ("seven_day", "week")):
+        block = data.get(key)
+        if block and block.get("utilization") is not None:
+            out.append((label, block["utilization"], block.get("resets_at")))
+    return out or None
+
+
+# ── Antigravity (opt-in, reverse-engineered — see module docstring) ─────────
+
+def _find_antigravity_process():
+    """Best-effort scan for a running Antigravity language-server process;
+    returns (port, csrf_token) pulled off its command line, or None."""
+    try:
+        if os.name == "nt":
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process | "
+                 "Where-Object { $_.CommandLine -like '*antigravity*' } | "
+                 "Select-Object CommandLine | ConvertTo-Json -Compress"],
+                capture_output=True, text=True, encoding="utf-8", timeout=10)
+            if r.returncode != 0 or not r.stdout.strip():
+                return None
+            data = json.loads(r.stdout)
+            cmdlines = [d.get("CommandLine", "") for d in
+                       (data if isinstance(data, list) else [data])]
+        else:
+            r = subprocess.run(["ps", "aux"], capture_output=True, text=True,
+                               encoding="utf-8", timeout=10)
+            if r.returncode != 0:
+                return None
+            cmdlines = [ln for ln in r.stdout.splitlines()
+                       if "antigravity" in ln.lower()]
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    for cmd in cmdlines:
+        port_m = re.search(r"--extension_server_port[= ]([0-9]+)", cmd or "")
+        csrf_m = re.search(r"--csrf_token[= ]([^\s\"']+)", cmd or "")
+        if port_m and csrf_m:
+            return int(port_m.group(1)), csrf_m.group(1)
+    return None
+
+
+def _antigravity_rpc(port, csrf):
+    body = json.dumps({"metadata": {"ideName": "antigravity",
+                                    "extensionName": "antigravity", "locale": "en"}}).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus",
+        data=body, headers={
+            "Accept": "application/json", "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1", "X-Codeium-Csrf-Token": csrf,
+        })
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+
+def _is_autocomplete_model(model_id, label):
+    return "gemini-2.5" in (model_id or "") or "Gemini 2.5" in (label or "")
+
+
+def _antigravity_parse_local(data):
+    status = data.get("userStatus", data)
+    items = []
+    plan = status.get("planStatus") or {}
+    avail, monthly = plan.get("availablePromptCredits"), (plan.get("planInfo") or {}).get("monthlyPromptCredits")
+    if isinstance(avail, (int, float)) and isinstance(monthly, (int, float)) and monthly > 0:
+        items.append(("credits", (monthly - avail) / monthly * 100, None))
+    for m in (status.get("cascadeModelConfigData") or {}).get("clientModelConfigs") or []:
+        model_id = (m.get("modelOrAlias") or {}).get("model")
+        label = m.get("label") or model_id or "model"
+        if _is_autocomplete_model(model_id, label):
+            continue
+        frac = (m.get("quotaInfo") or {}).get("remainingFraction")
+        if frac is None:
+            continue
+        items.append((label, (1 - frac) * 100, (m.get("quotaInfo") or {}).get("resetTime")))
+    return items or None
+
+
+def _antigravity_local():
+    proc = _find_antigravity_process()
+    if not proc:
+        return None
+    return _antigravity_parse_local(_antigravity_rpc(*proc))
+
+
+def _antigravity_parse_cli(snap):
+    items = []
+    pc = snap.get("promptCredits")
+    if pc and pc.get("usedPercentage") is not None:
+        items.append(("credits", pc["usedPercentage"] * 100, None))
+    for m in snap.get("models") or []:
+        if m.get("isAutocompleteOnly"):
+            continue
+        rp = m.get("remainingPercentage")
+        if rp is None:
+            continue
+        items.append((m.get("label") or m.get("modelId") or "model",
+                      (1 - rp) * 100, m.get("resetTime")))
+    return items or None
+
+
+def _antigravity_cli():
+    exe = shutil.which("antigravity-usage")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "--json"], capture_output=True, text=True,
+                           encoding="utf-8", timeout=15)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        return _antigravity_parse_cli(json.loads(r.stdout))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def fetch_antigravity():
+    """Opt-in only (--antigravity). Tries local IDE mode, then the
+    antigravity-usage CLI fallback. Both paths are reverse-engineered and can
+    break in unforeseen ways — caught broadly here so a shape change upstream
+    just empties the panel instead of taking down the dashboard."""
+    if not ANTIGRAVITY:
+        return None
+    try:
+        items = _antigravity_local() or _antigravity_cli()
+    except Exception:
+        return None
+    return items[:4] if items else None
+
+
+def render(rows, hidden_count, interactive, fmode="all", builds=None, usage=None, antigravity=None):
     """Returns (text, labels) where labels maps key → pr_key."""
     labels = {}
     lines = []
@@ -372,6 +578,24 @@ def render(rows, hidden_count, interactive, fmode="all", builds=None):
     lines.append(head)
     lines.append(f"{C.DIM} updated {now}{C.RESET}")
     lines.append(bar)
+
+    if usage:
+        lines.append(f"{C.BOLD}{C.YEL} USAGE{C.RESET}")
+        for label, pct, resets_at in usage:
+            col = usage_col(pct)
+            rtxt = _fmt_reset(resets_at)
+            reset_part = f"{C.DIM} · resets {rtxt}{C.RESET}" if rtxt else ""
+            lines.append(f" {col}{pct:>3.0f}%{C.RESET} {C.WHT}{label}{C.RESET}{reset_part}")
+        lines.append(bar)
+
+    if antigravity:
+        lines.append(f"{C.BOLD}{C.YEL} ANTIGRAVITY{C.RESET}")
+        for label, pct, resets_at in antigravity:
+            col = usage_col(pct)
+            rtxt = _fmt_reset(resets_at)
+            reset_part = f"{C.DIM} · resets {rtxt}{C.RESET}" if rtxt else ""
+            lines.append(f" {col}{pct:>3.0f}%{C.RESET} {C.WHT}{label}{C.RESET}{reset_part}")
+        lines.append(bar)
 
     if builds:
         lines.append(f"{C.BOLD}{C.YEL} RUNNING BUILDS · {len(builds)}{C.RESET}")
@@ -760,6 +984,8 @@ def main():
     hidden = load_hidden()
     all_rows = None
     all_builds = []
+    all_usage = None
+    all_antigravity = None
     need_fetch = True
     prev_snap = None
 
@@ -767,6 +993,8 @@ def main():
         if need_fetch:
             all_rows = fetch()
             all_builds = fetch_builds() if BUILDS else []
+            all_usage = fetch_usage()
+            all_antigravity = fetch_antigravity()
             curr_snap = _state_snapshot(all_rows)
             _diff_notify(prev_snap, curr_snap, all_rows)
             prev_snap = curr_snap
@@ -780,7 +1008,7 @@ def main():
 
         if watch:
             clear_screen()
-        out, labels = render(visible, hidden_count, interactive, fmode, all_builds)
+        out, labels = render(visible, hidden_count, interactive, fmode, all_builds, all_usage, all_antigravity)
         print(out)
 
         if not watch:
