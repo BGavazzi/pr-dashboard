@@ -1,0 +1,26 @@
+name: Deploy Kindle PR dashboard
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "kindle/**"
+      - ".github/workflows/deploy-kindle.yml"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, pr-dashboard]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write .env
+        working-directory: kindle
+        run: echo "GH_TOKEN=${{ secrets.KINDLE_DASHBOARD_GH_TOKEN }}" > .env
+
+      - name: Build and restart
+        working-directory: kindle
+        run: docker compose up -d --build
+
+      - name: Prune old images
+        run: docker image prune -f

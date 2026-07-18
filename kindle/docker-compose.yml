@@ -1,0 +1,9 @@
+services:
+  pr-dashboard-kindle:
+    build: .
+    container_name: pr-dashboard-kindle
+    restart: unless-stopped
+    ports:
+      - "8090:8082"
+    environment:
+      - GH_TOKEN=${GH_TOKEN}
